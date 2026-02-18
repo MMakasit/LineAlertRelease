@@ -1,0 +1,9 @@
+{
+    "line_channel_access_token": "YOUR_CHANNEL_ACCESS_TOKEN",
+    "check_interval": 2.0,
+    "confidence": 0.9,
+    "cooldown_seconds": 60,
+    "message": "Alert! Character Died.",
+    "game_process_name": "SO3DPlus.exe",
+    "crash_message": "Game Crashed/Closed!"
+}
