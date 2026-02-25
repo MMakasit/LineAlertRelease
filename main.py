@@ -1,4 +1,3 @@
-import psutil
 import pyautogui
 import requests
 import json
@@ -8,6 +7,9 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
+from pystray import MenuItem as item
+import pystray
+from PIL import Image, ImageDraw
 
 # Constants
 CONFIG_FILE = 'config.json'
@@ -17,8 +19,8 @@ LINE_API_URL = 'https://api.line.me/v2/bot/message/broadcast'
 class LineAlertApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("LINE Alert Bot - Seal Online")
-        self.root.geometry("400x450")
+        self.root.title("LINE Alert Bot - Pixel Monitor")
+        self.root.geometry("400x500")
         self.root.resizable(False, False)
 
         # Configuration
@@ -28,19 +30,29 @@ class LineAlertApp:
         self.conf = self.config.get('confidence', 0.9)
         self.cooldown = self.config.get('cooldown_seconds', 60)
         self.msg_text = self.config.get('message', "Alert!")
-        self.game_process_name = self.config.get('game_process_name', "")
-        self.crash_msg_text = self.config.get('crash_message', "Game Crashed!")
+        
+        # New Pixel Config
+        self.desktop_color = tuple(self.config.get('desktop_color_rgb', [15, 15, 15]))
+        self.game1_pos = tuple(self.config.get('game1_pos', [100, 100]))
+        self.game2_pos = tuple(self.config.get('game2_pos', [500, 100]))
+        self.game1_msg = self.config.get('game1_closed_msg', "เกมจอ 1 ถูกปิด!")
+        self.game2_msg = self.config.get('game2_closed_msg', "เกมจอ 2 ถูกปิด!")
 
         self.running = False
         self.monitor_thread = None
         self.last_alert_time = 0
-        self.was_game_running = False
+        self.game1_was_closed = False
+        self.game2_was_closed = False
 
         # GUI Components
         self.create_widgets()
         
         # Auto-start monitoring
         self.start_monitoring()
+
+        # Tray Icon setup
+        self.tray_icon = None
+        self.root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
 
     def load_config(self):
         try:
@@ -50,19 +62,45 @@ class LineAlertApp:
             messagebox.showerror("Config Error", f"Could not load config.json:\n{e}")
             return {}
 
+    def save_config(self):
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            self.log(f"Error saving config: {e}")
+
     def create_widgets(self):
         # Title
         tk.Label(self.root, text="LINE Alert System", font=("Arial", 16, "bold")).pack(pady=10)
 
         # Status Frame
-        status_frame = tk.LabelFrame(self.root, text="Status", padx=10, pady=10)
+        status_frame = tk.LabelFrame(self.root, text="Status & Controls", padx=10, pady=10)
         status_frame.pack(fill="x", padx=10)
 
         self.lbl_monitoring = tk.Label(status_frame, text="Monitoring: STOPPED", fg="red", font=("Arial", 10))
         self.lbl_monitoring.pack(anchor="w")
 
-        self.lbl_game_status = tk.Label(status_frame, text=f"Game Process ({self.game_process_name}): Not Detected", fg="gray")
-        self.lbl_game_status.pack(anchor="w")
+        # Desktop Color Row
+        dt_frame = tk.Frame(status_frame)
+        dt_frame.pack(fill="x", pady=2)
+        tk.Label(dt_frame, text="Target Desktop Color:").pack(side="left")
+        self.lbl_desktop_color = tk.Label(dt_frame, text=str(self.desktop_color), fg="blue")
+        self.lbl_desktop_color.pack(side="left", padx=5)
+        tk.Button(dt_frame, text="Set Desktop Color", command=self.start_capture_desktop_color, font=("Arial", 8)).pack(side="right")
+
+        # Window 1 Row
+        g1_frame = tk.Frame(status_frame)
+        g1_frame.pack(fill="x", pady=2)
+        self.lbl_game1_status = tk.Label(g1_frame, text=f"Window 1: Checking...", fg="gray")
+        self.lbl_game1_status.pack(side="left")
+        tk.Button(g1_frame, text="Set Pos 1", command=lambda: self.start_capture_pos(1), font=("Arial", 8)).pack(side="right")
+
+        # Window 2 Row
+        g2_frame = tk.Frame(status_frame)
+        g2_frame.pack(fill="x", pady=2)
+        self.lbl_game2_status = tk.Label(g2_frame, text=f"Window 2: Checking...", fg="gray")
+        self.lbl_game2_status.pack(side="left")
+        tk.Button(g2_frame, text="Set Pos 2", command=lambda: self.start_capture_pos(2), font=("Arial", 8)).pack(side="right")
 
         self.lbl_last_detected = tk.Label(status_frame, text="Last Alert: None")
         self.lbl_last_detected.pack(anchor="w")
@@ -108,6 +146,43 @@ class LineAlertApp:
         self.log("Sending test message...")
         threading.Thread(target=self.send_line_broadcast, args=("This is a TEST message from your LineBot.",)).start()
 
+    def start_capture_pos(self, window_num):
+        self.log(f"Setting Position for Window {window_num}...")
+        self.log("Move mouse to target pixel. Capturing in 3s...")
+        
+        def capture():
+            time.sleep(3)
+            x, y = pyautogui.position()
+            color = pyautogui.pixel(x, y)
+            pos = [x, y]
+            if window_num == 1:
+                self.game1_pos = tuple(pos)
+                self.config['game1_pos'] = pos
+            else:
+                self.game2_pos = tuple(pos)
+                self.config['game2_pos'] = pos
+            
+            self.save_config()
+            self.log(f"Window {window_num} Set -> Pos: ({x}, {y}), Color: {color}")
+
+        threading.Thread(target=capture, daemon=True).start()
+
+    def start_capture_desktop_color(self):
+        self.log("Setting Desktop Color...")
+        self.log("Move mouse to a clean area of your desktop. Capturing in 3s...")
+        
+        def capture():
+            time.sleep(3)
+            x, y = pyautogui.position()
+            color = pyautogui.pixel(x, y)
+            self.desktop_color = color
+            self.config['desktop_color_rgb'] = list(color)
+            self.save_config()
+            self.lbl_desktop_color.config(text=str(color))
+            self.log(f"Desktop Color set to: {color}")
+
+        threading.Thread(target=capture, daemon=True).start()
+
     def get_image_list(self, directory):
         images = []
         if not os.path.exists(directory):
@@ -126,16 +201,30 @@ class LineAlertApp:
                 continue
         return False, None
 
-    def check_process_running(self, process_name):
-        if not process_name:
-            return False
-        for proc in psutil.process_iter(['name']):
-            try:
-                if process_name.lower() in proc.info['name'].lower():
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
-        return False
+
+
+    def create_tray_icon(self):
+        # Create a simple icon (green square)
+        image = Image.new('RGB', (64, 64), color=(0, 128, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((16, 16, 48, 48), fill=(255, 255, 255))
+        
+        menu = (item('Show', self.show_window), item('Exit', self.quit_window))
+        self.tray_icon = pystray.Icon("name", image, "Line Alert Bot", menu)
+        self.tray_icon.run()
+
+    def minimize_to_tray(self):
+        self.root.withdraw()
+        self.create_tray_icon()
+
+    def show_window(self, icon, item):
+        self.tray_icon.stop()
+        self.root.after(0, self.root.deiconify)
+
+    def quit_window(self, icon, item):
+        self.tray_icon.stop()
+        self.root.destroy()
+        sys.exit()
 
     def start_monitoring(self):
         if not self.running:
@@ -157,39 +246,47 @@ class LineAlertApp:
         while self.running:
             current_time = time.time()
             
-            # 1. Update Game Process Status
-            if self.game_process_name:
-                is_game_running = self.check_process_running(self.game_process_name)
+            # 1. Pixel Monitoring for 2 Windows
+            try:
+                # Check Window 1
+                current_c1 = pyautogui.pixel(self.game1_pos[0], self.game1_pos[1])
+                is_g1_desktop = pyautogui.pixelMatchesColor(self.game1_pos[0], self.game1_pos[1], self.desktop_color, tolerance=15)
                 
-                # Update UI label (using lambda/after is safer for thread-safety but simple config update often works in tk)
-                # Ideally use self.root.after, but for simple label text update:
-                status_text = "Detected (Running)" if is_game_running else "Not Detected"
-                status_color = "green" if is_game_running else "red"
-                self.lbl_game_status.config(text=f"Game Process ({self.game_process_name}): {status_text}", fg=status_color)
+                status1_text = "Closed (Desktop)" if is_g1_desktop else "Active (Game)"
+                status1_color = "red" if is_g1_desktop else "green"
+                self.lbl_game1_status.config(text=f"Window 1: {status1_text} {current_c1}", fg=status1_color)
 
-                if is_game_running:
-                    if not self.was_game_running:
-                        self.log(f"Game '{self.game_process_name}' started.")
-                        self.was_game_running = True
+                if is_g1_desktop:
+                    if not self.game1_was_closed:
+                        self.log(f"Window 1 closed! (Current: {current_c1} matched Desktop: {self.desktop_color})")
+                        self.send_line_broadcast(self.game1_msg)
+                        self.game1_was_closed = True
                 else:
-                    if self.was_game_running:
-                        self.log("GAME PROCESS LOST! Sending alert...")
-                        self.send_line_broadcast(self.crash_msg_text)
-                        self.was_game_running = False
+                    self.game1_was_closed = False
+
+                # Check Window 2
+                current_c2 = pyautogui.pixel(self.game2_pos[0], self.game2_pos[1])
+                is_g2_desktop = pyautogui.pixelMatchesColor(self.game2_pos[0], self.game2_pos[1], self.desktop_color, tolerance=15)
+                
+                status2_text = "Closed (Desktop)" if is_g2_desktop else "Active (Game)"
+                status2_color = "red" if is_g2_desktop else "green"
+                self.lbl_game2_status.config(text=f"Window 2: {status2_text} {current_c2}", fg=status2_color)
+
+                if is_g2_desktop:
+                    if not self.game2_was_closed:
+                        self.log(f"Window 2 closed! (Current: {current_c2} matched Desktop: {self.desktop_color})")
+                        self.send_line_broadcast(self.game2_msg)
+                        self.game2_was_closed = True
+                else:
+                    self.game2_was_closed = False
+
+            except Exception as e:
+                self.log(f"Pixel match error: {e}")
             
             # 2. Death Detection
-            # Only check if game is running (or if monitoring is disabled)
-            should_check_death = True
-            if self.game_process_name and not self.was_game_running:
-                should_check_death = False
-
             image_paths = self.get_image_list(ASSETS_DIR)
             
-            if not image_paths and should_check_death:
-                 # Throttle "no images" log to avoid span
-                 pass 
-
-            if should_check_death and image_paths:
+            if image_paths:
                 if current_time - self.last_alert_time > self.cooldown:
                     is_dead, found_img = self.check_for_death(image_paths)
                     if is_dead:
@@ -211,9 +308,12 @@ if __name__ == "__main__":
             "check_interval": 2.0,
             "confidence": 0.9,
             "cooldown_seconds": 60,
-            "message": "Alert! Character Died.",
-            "game_process_name": "SO3DPlus.exe",
-            "crash_message": "Game Crashed/Closed!"
+            "message": "ตัวละครของคุณตายแล้ว!",
+            "desktop_color_rgb": [15, 15, 15],
+            "game1_pos": [100, 100],
+            "game2_pos": [500, 100],
+            "game1_closed_msg": "เกมจอ 1 ถูกปิด!",
+            "game2_closed_msg": "เกมจอ 2 ถูกปิด!"
         }
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(default_config, f, indent=4)
